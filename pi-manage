@@ -83,7 +83,7 @@ import jwt
 import ast
 
 SILENT = True
-
+MYSQL_DIALECTS = ["mysql", "pymysql", "mysql+pymysql"]
 
 app = create_app(config_name='production', silent=SILENT)
 manager = Manager(app)
@@ -231,7 +231,7 @@ def create(directory="/var/lib/privacyidea/backup/",
         print("Backup SQLite %s" % productive_file)
         sqlfile = "%s/db-%s.sqlite" % (directory, DATE)
         call(["cp", productive_file, sqlfile])
-    elif sqltype in ["mysql", "pymysql"]:
+    elif sqltype in MYSQL_DIALECTS:
         m = re.match(".*mysql://(.*):(.*)@(.*)/(.*)", sqluri)
         username = m.groups()[0]
         password = m.groups()[1]
@@ -333,7 +333,7 @@ def restore(backup_file):
         print("Restore SQLite %s" % productive_file)
         call(["cp", sqlfile, productive_file])
         os.unlink(sqlfile)
-    elif sqltype in ["mysql", "pymysql"]:
+    elif sqltype in MYSQL_DIALECTS:
         m = re.match(".*mysql://(.*):(.*)@(.*)/(.*)", sqluri)
         username = m.groups()[0]
         password = m.groups()[1]
@@ -949,28 +949,46 @@ def create(name, scope, action, filename=None):
         return r
 
 
-@api_manager.command
-def createtoken(role=ROLE.ADMIN):
+@api_manager.option('-r', '--role',
+                    help="The role of the API key can either be "
+                         "'admin' or 'validate' to access the admin "
+                         "API or the validate API.",
+                    default=ROLE.ADMIN)
+@api_manager.option('-d', '--days',
+                    help='The number of days the access token should be valid.'
+                         ' Defaults to 365.',
+                    default=365)
+@api_manager.option('-R', '--realm',
+                    help='The realm of the admin. Defaults to "API"',
+                    default="API")
+@api_manager.option('-u', '--username',
+                    help='The username of the admin.')
+def createtoken(role, days, realm, username):
     """
     Create an API authentication token
     for administrative or validate use.
     Possible roles are "admin" or "validate".
     """
-    username = geturandom(hex=True)
+    if role not in ["admin", "validate"]:
+        print("ERROR: The role must be 'admin' or 'validate'!")
+        sys.exit(1)
+    username = username or geturandom(hex=True)
     secret = app.config.get("SECRET_KEY")
     authtype = "API"
-    validity = timedelta(days=365)
+    validity = timedelta(days=int(days))
     token = jwt.encode({"username": username,
-                        "realm": "API",
+                        "realm": realm,
                         "nonce": geturandom(hex=True),
                         "role": role,
                         "authtype": authtype,
                         "exp": datetime.datetime.utcnow() + validity,
                         "rights": "TODO"},
                        secret)
-    print("Username:   %s" % username)
-    print("Role:       %s" % role)
-    print("Auth-Token: %s" % token)
+    print("Username:   {0!s}".format(username))
+    print("Realm:      {0!s}".format(realm))
+    print("Role:       {0!s}".format(role))
+    print("Validity:   {0!s} days".format(days))
+    print("Auth-Token: {0!s}".format(token))
 
 
 if __name__ == '__main__':

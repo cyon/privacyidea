@@ -19,7 +19,7 @@ OTPKE2 = "31323334353637383930313233343536373839AA"
 
 from .base import MyTestCase
 from privacyidea.lib.user import (User)
-from privacyidea.lib.tokenclass import TokenClass
+from privacyidea.lib.tokenclass import TokenClass, TOKENKIND
 from privacyidea.lib.tokens.totptoken import TotpTokenClass
 from privacyidea.models import (Token, Challenge, TokenRealm)
 from privacyidea.lib.config import (set_privacyidea_config, get_token_types)
@@ -55,7 +55,8 @@ from privacyidea.lib.token import (create_tokenclass_object,
                                    get_dynamic_policy_definitions,
                                    get_tokens_paginate,
                                    set_validity_period_end,
-                                   set_validity_period_start, remove_token, delete_tokeninfo)
+                                   set_validity_period_start, remove_token, delete_tokeninfo,
+                                   import_token)
 
 from privacyidea.lib.error import (TokenAdminError, ParameterError,
                                    privacyIDEAError)
@@ -1261,6 +1262,71 @@ class TokenTestCase(MyTestCase):
                                  "otpkeyformat": "base32check"},
                                 user=User(login="cornelius", realm=self.realm1))
         remove_token("NEW006") # TODO: Token is created anyway?
+
+    def test_51_tokenkind(self):
+        # A normal token will be of kind "software"
+        tok = init_token({"type": "totp", "otpkey": self.otpkey})
+        kind = tok.get_tokeninfo("tokenkind")
+        self.assertEqual(kind, TOKENKIND.SOFTWARE)
+        tok.delete_token()
+
+        # A token, that is imported, will be of kind "hardware"
+        tok = init_token({"type": "totp", "otpkey": self.otpkey},
+                         tokenkind=TOKENKIND.HARDWARE)
+        kind = tok.get_tokeninfo("tokenkind")
+        self.assertEqual(kind, TOKENKIND.HARDWARE)
+        tok.delete_token()
+
+        # A yubikey initialized as HOTP is hardware
+        tok = init_token({"type": "hotp", "otpkey": self.otpkey,
+                          "serial": "UBOM111111"})
+        kind = tok.get_tokeninfo("tokenkind")
+        self.assertEqual(kind, TOKENKIND.HARDWARE)
+        tok.delete_token()
+
+        # A yubikey and yubicloud tokentype is hardware
+        tok = init_token({"type": "yubikey", "otpkey": self.otpkey})
+        kind = tok.get_tokeninfo("tokenkind")
+        self.assertEqual(kind, TOKENKIND.HARDWARE)
+        tok.delete_token()
+
+        tok = init_token({"type": "yubico",
+                          "yubico.tokenid": "123456789012"})
+        kind = tok.get_tokeninfo("tokenkind")
+        self.assertEqual(kind, TOKENKIND.HARDWARE)
+        tok.delete_token()
+
+        # 4eyes, radius and remote are virtual tokens
+        tok = init_token({"type": "radius", "radius.identifier": "1",
+                          "radius.user": "hans"})
+        kind = tok.get_tokeninfo("tokenkind")
+        self.assertEqual(kind, TOKENKIND.VIRTUAL)
+        tok.delete_token()
+
+        tok = init_token({"type": "remote", "remote.server": "1",
+                          "radius.user": "hans"})
+        kind = tok.get_tokeninfo("tokenkind")
+        self.assertEqual(kind, TOKENKIND.VIRTUAL)
+        tok.delete_token()
+
+        tok = init_token({"type": "4eyes", "4eyes": "realm1",
+                          "separator": ","})
+        kind = tok.get_tokeninfo("tokenkind")
+        self.assertEqual(kind, TOKENKIND.VIRTUAL)
+        tok.delete_token()
+
+    def test_52_import_token(self):
+        tok = import_token("IMP001",
+                           {"type": "totp",
+                            "timeShift": "-122",
+                            "timeStep": "30",
+                            "otpkey": self.otpkey,
+                            "counter": "121212"})
+        self.assertEqual(tok.get_tokeninfo("timeShift"), "-122")
+        self.assertEqual(tok.get_tokeninfo("timeStep"), "30")
+        self.assertEqual(tok.get_otp_count(), 121212)
+        remove_token("IMP001")
+
 
 class TokenFailCounterTestCase(MyTestCase):
     """

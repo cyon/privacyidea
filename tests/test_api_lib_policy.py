@@ -22,8 +22,10 @@ from privacyidea.api.lib.prepolicy import (check_token_upload,
                                            check_external, api_key_required,
                                            mangle, is_remote_user_allowed,
                                            required_email, auditlog_age,
-                                           papertoken_count, allowed_audit_realm)
+                                           papertoken_count, allowed_audit_realm,
+                                           u2ftoken_verify_cert)
 from privacyidea.api.lib.postpolicy import (check_serial, check_tokentype,
+                                            check_tokeninfo,
                                             no_detail_on_success,
                                             no_detail_on_fail, autoassign,
                                             offline_info, sign_response,
@@ -1177,6 +1179,40 @@ class PrePolicyDecoratorTestCase(MyTestCase):
         delete_policy("auditrealm1")
         delete_policy("auditrealm2")
 
+    def test_21_u2f_verify_cert(self):
+        # Usually the attestation certificate gets verified during enrollment unless
+        # we set the policy scope=enrollment, action=no_verifcy
+        from privacyidea.lib.tokens.u2ftoken import U2FACTION
+        g.logged_in_user = {"username": "user1",
+                            "role": "user"}
+        builder = EnvironBuilder(method='POST',
+                                 data={'serial': "OATH123456"},
+                                 headers={})
+        env = builder.get_environ()
+        # Set the remote address so that we can filter for it
+        env["REMOTE_ADDR"] = "10.0.0.1"
+        g.client_ip = env["REMOTE_ADDR"]
+        req = Request(env)
+        req.User = User()
+        # The default behaviour is to verify the certificate
+        req.all_data = {
+            "type": "u2f"}
+        u2ftoken_verify_cert(req, "init")
+        self.assertTrue(req.all_data.get("u2f.verify_cert"))
+
+        # Set a policy that defines to NOT verify the certificate
+        set_policy(name="polu2f1",
+                   scope=SCOPE.ENROLL,
+                   action=U2FACTION.NO_VERIFY_CERT)
+        g.policy_object = PolicyClass()
+        req.all_data = {
+            "type": "u2f"}
+        u2ftoken_verify_cert(req, "init")
+        self.assertFalse(req.all_data.get("u2f.verify_cert"))
+
+        # finally delete policy
+        delete_policy("polu2f1")
+
 
 class PostPolicyDecoratorTestCase(MyTestCase):
 
@@ -1260,6 +1296,67 @@ class PostPolicyDecoratorTestCase(MyTestCase):
         self.assertRaises(PolicyError,
                           check_tokentype,
                           req, resp)
+
+    def test_03_check_tokeninfo(self):
+        token_obj = init_token({"type": "SPASS", "serial": "PISP0001"})
+        token_obj.set_tokeninfo({"testkey": "testvalue"})
+
+        # http://werkzeug.pocoo.org/docs/0.10/test/#environment-building
+        builder = EnvironBuilder(method='POST',
+                                 data={'serial': "PISP0001"},
+                                 headers={})
+        env = builder.get_environ()
+        # Set the remote address so that we can filter for it
+        env["REMOTE_ADDR"] = "10.0.0.1"
+        g.client_ip = env["REMOTE_ADDR"]
+        req = Request(env)
+        # The response contains the token type SPASS
+        res = {"jsonrpc": "2.0",
+               "result": {"status": True,
+                          "value": True},
+               "version": "privacyIDEA test",
+               "id": 1,
+               "detail": {"message": "matching 1 tokens",
+                          "serial": "PISP0001",
+                          "type": "spass"}}
+        resp = Response(json.dumps(res))
+
+        # Set a policy, that does match
+        set_policy(name="pol1",
+                   scope=SCOPE.AUTHZ,
+                   action="tokeninfo=testkey/test.*/", client="10.0.0.0/8")
+        g.policy_object = PolicyClass()
+        r = check_tokeninfo(req, resp)
+        jresult = json.loads(r.data)
+        self.assertTrue(jresult.get("result").get("value"))
+
+        # Set a policy that does NOT match
+        set_policy(name="pol1",
+                   scope=SCOPE.AUTHZ,
+                   action="tokeninfo=testkey/NO.*/", client="10.0.0.0/8")
+        g.policy_object = PolicyClass()
+        self.assertRaises(PolicyError,
+                          check_tokeninfo,
+                          req, resp)
+
+        # Set a policy, but the token has no tokeninfo!
+        # Thus the authorization will fail
+        token_obj.del_tokeninfo("testkey")
+        self.assertRaises(PolicyError,
+                          check_tokeninfo,
+                          req, resp)
+
+        # If we set an invalid policy, authorization will succeed
+        set_policy(name="pol1",
+                   scope=SCOPE.AUTHZ,
+                   action="tokeninfo=testkey/missingslash", client="10.0.0.0/8")
+        g.policy_object = PolicyClass()
+        r = check_tokeninfo(req, resp)
+        jresult = json.loads(r.data)
+        self.assertTrue(jresult.get("result").get("value"))
+
+        delete_policy("pol1")
+        remove_token("PISP0001")
 
     def test_02_check_serial(self):
         # http://werkzeug.pocoo.org/docs/0.10/test/#environment-building
@@ -1415,7 +1512,7 @@ class PostPolicyDecoratorTestCase(MyTestCase):
         self.assertTrue("user" not in jresult.get("detail"), jresult)
 
         # A successful get a user added
-        # Set a policy, that does not allow the detail on success
+        # Set a policy, that adds user info to detail
         set_policy(name="pol_add_user",
                    scope=SCOPE.AUTHZ,
                    action=ACTION.ADDUSERINRESPONSE, client="10.0.0.0/8")
@@ -1424,7 +1521,24 @@ class PostPolicyDecoratorTestCase(MyTestCase):
         new_response = add_user_detail_to_response(req, resp)
         jresult = json.loads(new_response.data)
         self.assertTrue("user" in jresult.get("detail"), jresult)
+        self.assertFalse("user-resolver" in jresult.get("detail"), jresult)
+        self.assertFalse("user-realm" in jresult.get("detail"), jresult)
+
+        # set a policy that adds user resolver to detail
+        set_policy(name="pol_add_resolver",
+                   scope=SCOPE.AUTHZ,
+                   action=ACTION.ADDRESOLVERINRESPONSE, client="10.0.0.0/8")
+        g.policy_object = PolicyClass()
+
+        new_response = add_user_detail_to_response(req, resp)
+        jresult = json.loads(new_response.data)
+        self.assertTrue("user-resolver" in jresult.get("detail"), jresult)
+        self.assertEqual(jresult.get("detail").get("user-resolver"), self.resolvername1)
+        self.assertTrue("user-realm" in jresult.get("detail"), jresult)
+        self.assertEqual(jresult.get("detail").get("user-realm"), self.realm1)
+
         delete_policy("pol_add_user")
+        delete_policy("pol_add_resolver")
 
     def test_05_autoassign_any_pin(self):
         # init a token, that does has no uwser

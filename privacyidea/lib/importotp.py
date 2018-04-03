@@ -44,11 +44,11 @@
 It is used for importing SafeNet (former Aladdin)
 XML files, that hold the OTP secrets for eToken PASS.
 '''
-
 import defusedxml.ElementTree as etree
 import re
 import binascii
 import base64
+import cgi
 from privacyidea.lib.utils import modhex_decode
 from privacyidea.lib.utils import modhex_encode
 from privacyidea.lib.log import log_with
@@ -476,7 +476,7 @@ def parsePSKCdata(xml_data,
         except Exception as exx:
             log.debug("Can not get serial string from device info {0!s}".format(exx))
         algo = key["algorithm"]
-        token["type"] = algo[-4:].lower()
+        token["type"] = algo.split(":")[-1].lower()
         parameters = key.algorithmparameters
         token["otplen"] = parameters.responseformat["length"] or 6
         try:
@@ -502,10 +502,13 @@ def parsePSKCdata(xml_data,
             log.debug(traceback.format_exc())
             raise ImportException("Failed to import tokendata. Wrong "
                                   "encryption key? %s" % exx)
-        if token["type"] == "hotp" and key.data.counter:
-                token["counter"] = key.data.counter.text.strip()
-        elif token["type"] == "totp" and key.data.timeinterval:
+        if token["type"] in ["hotp", "totp"] and key.data.counter:
+            token["counter"] = key.data.counter.text.strip()
+        if token["type"] == "totp":
+            if key.data.timeinterval:
                 token["timeStep"] = key.data.timeinterval.text.strip()
+            if key.data.timedrift:
+                token["timeShift"] = key.data.timedrift.text.strip()
 
         tokens[serial] = token
     return tokens
@@ -569,9 +572,8 @@ def export_pskc(tokenobj_list, psk=None):
 
     :param tokenobj_list: list of token objects
     :param psk: pre-shared-key for AES-128-CBC in hex format
-    :return: tuple of (psk, beautifulsoup)
+    :return: tuple of (psk, number of tokens, beautifulsoup)
     """
-    import os
     if psk:
         psk = binascii.unhexlify(psk)
     else:
@@ -579,6 +581,7 @@ def export_pskc(tokenobj_list, psk=None):
 
     mackey = geturandom(20)
     encrypted_mackey = aes_encrypt_b64(psk, mackey)
+    number_of_exported_tokens = 0
 
     # define the header
     soup = BeautifulSoup("""<KeyContainer Version="1.0"
@@ -600,63 +603,76 @@ def export_pskc(tokenobj_list, psk=None):
 """.format(encrypted_mackey=encrypted_mackey), "html.parser")
 
     for tokenobj in tokenobj_list:
-        if tokenobj.type.lower() not in ["totp", "hotp"]:
+        if tokenobj.type.lower() not in ["totp", "hotp", "pw"]:
             continue
         type = tokenobj.type.lower()
         issuer = "privacyIDEA"
-        manufacturer = tokenobj.token.description
+        try:
+            manufacturer = tokenobj.token.description.encode("ascii")
+        except UnicodeEncodeError:
+            manufacturer = "deleted during export"
         serial = tokenobj.token.serial
         otplen = tokenobj.token.otplen
         counter = tokenobj.token.count
         suite = tokenobj.get_tokeninfo("hashlib", default="sha1")
         if type == "totp":
             timestep = tokenobj.get_tokeninfo("timeStep")
+            timedrift = tokenobj.get_tokeninfo("timeShift")
         else:
             timestep = 0
+            timedrift = 0
         otpkey = tokenobj.token.get_otpkey().getKey()
         try:
             encrypted_otpkey = aes_encrypt_b64(psk, binascii.unhexlify(otpkey))
         except TypeError:
             # Some keys might be odd string length
             continue
-        kp2 = BeautifulSoup("""<KeyPackage>
-    <DeviceInfo>
-      <Manufacturer>{manufacturer}</Manufacturer>
-      <SerialNo>{serial}</SerialNo>
-    </DeviceInfo>
-    <Key Id="{serial}"
-         Algorithm="urn:ietf:params:xml:ns:keyprov:pskc:{type}">
-             <Issuer>{issuer}</Issuer>
-             <AlgorithmParameters>
-                 <ResponseFormat Length="{otplen}" Encoding="DECIMAL"/>
-                 <Suite hashalgo="{suite}" />
-             </AlgorithmParameters>
-             <Data>
-                <Secret>
-                     <EncryptedValue>
-                         <xenc:EncryptionMethod Algorithm="http://www.w3.org/2001/04/xmlenc#aes128-cbc"/>
-                         <xenc:CipherData>
-                             <xenc:CipherValue>{encrypted_otpkey}</xenc:CipherValue>
-                         </xenc:CipherData>
-                     </EncryptedValue>
-                 </Secret>
-                 <ValueMAC>TODOmissing</ValueMAC>
-                <Time>
-                    <PlainValue>0</PlainValue>
-                </Time>
-                <TimeInterval>
-                    <PlainValue>{timestep}</PlainValue>
-                </TimeInterval>
-                <Counter>
-                    {counter}
-                </Counter>
-            </Data>
-    </Key>
-    </KeyPackage>""".format(serial=serial, type=type, otplen=otplen,
-                            issuer=issuer, manufacturer=manufacturer,
-                            counter=counter, timestep=timestep, encrypted_otpkey=encrypted_otpkey,
-                            suite=suite), "html.parser")
+        try:
+            kp2 = BeautifulSoup("""<KeyPackage>
+        <DeviceInfo>
+          <Manufacturer>{manufacturer}</Manufacturer>
+          <SerialNo>{serial}</SerialNo>
+        </DeviceInfo>
+        <Key Id="{serial}"
+             Algorithm="urn:ietf:params:xml:ns:keyprov:pskc:{type}">
+                 <Issuer>{issuer}</Issuer>
+                 <AlgorithmParameters>
+                     <ResponseFormat Length="{otplen}" Encoding="DECIMAL"/>
+                     <Suite hashalgo="{suite}" />
+                 </AlgorithmParameters>
+                 <Data>
+                    <Secret>
+                         <EncryptedValue>
+                             <xenc:EncryptionMethod Algorithm="http://www.w3.org/2001/04/xmlenc#aes128-cbc"/>
+                             <xenc:CipherData>
+                                 <xenc:CipherValue>{encrypted_otpkey}</xenc:CipherValue>
+                             </xenc:CipherData>
+                         </EncryptedValue>
+                     </Secret>
+                     <ValueMAC>TODOmissing</ValueMAC>
+                    <Time>
+                        <PlainValue>0</PlainValue>
+                    </Time>
+                    <TimeInterval>
+                        <PlainValue>{timestep}</PlainValue>
+                    </TimeInterval>
+                    <Counter>
+                        <PlainValue>{counter}</PlainValue>
+                    </Counter>
+                    <TimeDrift>
+                        <PlainValue>{timedrift}</PlainValue>
+                    </TimeDrift>
+                </Data>
+        </Key>
+        </KeyPackage>""".format(serial=cgi.escape(serial), type=cgi.escape(type), otplen=otplen,
+                                issuer=cgi.escape(issuer), manufacturer=cgi.escape(manufacturer),
+                                counter=counter, timestep=timestep, encrypted_otpkey=encrypted_otpkey,
+                                timedrift=timedrift,
+                                suite=cgi.escape(suite)), "html.parser")
 
-        soup.macmethod.insert_after(kp2)
+            soup.macmethod.insert_after(kp2)
+            number_of_exported_tokens += 1
+        except Exception as e:
+            log.warning(u"Failed to export the token {0!s}: {1!s}".format(serial, e))
 
-    return binascii.hexlify(psk), soup
+    return binascii.hexlify(psk), number_of_exported_tokens, soup

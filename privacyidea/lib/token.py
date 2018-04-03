@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 #  privacyIDEA is a fork of LinOTP
 #
+#  2018-01-21 Cornelius Kölbel <cornelius.koelbel@netknights.it>
+#             Add tokenkind
 #  2017-08-11 Cornelius Kölbel <cornelius.koelbel@netknights.it>
 #             Add auth_cache
 #  2017-04-19 Cornelius Kölbel <cornelius.koelbel@netknights.it>
@@ -92,6 +94,7 @@ from privacyidea.lib.policydecorators import (libpolicy,
                                               auth_cache,
                                               config_lost_token)
 from privacyidea.lib.tokenclass import DATE_FORMAT
+from privacyidea.lib.tokenclass import TOKENKIND
 from dateutil.tz import tzlocal
 
 log = logging.getLogger(__name__)
@@ -844,7 +847,45 @@ def gen_serial(tokentype=None, prefix=None):
 
 
 @log_with(log)
-def init_token(param, user=None, tokenrealms=None):
+def import_token(serial, token_dict, default_hashlib=None, tokenrealms=None):
+    """
+    This function is used during the import of a PSKC file.
+
+    :param serial: The serial number of the token
+    :param token_dict: A dictionary describing the token like:
+        {"type": ...,
+         "description": ...,
+         "otpkey": ...,
+         "counter: ...,
+         "timeShift": ...}
+    :param default_hashlib:
+    :return: the token object
+    """
+    init_param = {'serial': serial,
+                  'type': token_dict['type'],
+                      'description': token_dict.get("description",
+                                                        "imported"),
+                      'otpkey': token_dict['otpkey'],
+                      'otplen': token_dict.get('otplen'),
+                      'timeStep': token_dict.get('timeStep'),
+                      'hashlib': token_dict.get('hashlib')}
+
+    if default_hashlib and default_hashlib != "auto":
+        init_param['hashlib'] = default_hashlib
+
+    # Imported tokens are usually hardware tokens
+    token = init_token(init_param, tokenrealms=tokenrealms,
+                       tokenkind=TOKENKIND.HARDWARE)
+    if token_dict.get("counter"):
+        token.set_otp_count(token_dict.get("counter"))
+    if token_dict.get("timeShift"):
+        token.add_tokeninfo("timeShift", token_dict.get("timeShift"))
+    return token
+
+
+@log_with(log)
+def init_token(param, user=None, tokenrealms=None,
+               tokenkind=None):
     """
     create a new token or update an existing token
 
@@ -857,6 +898,8 @@ def init_token(param, user=None, tokenrealms=None):
     :type user: User Object
     :param tokenrealms: the realms, to which the token should belong
     :type tokenrealms: list
+    :param tokenkind: The kind of the token, can be "software",
+        "hardware" or "virtual"
 
     :return: token object or None
     :rtype: TokenClass object
@@ -934,6 +977,12 @@ def init_token(param, user=None, tokenrealms=None):
         log.error('token create failed!')
         log.debug("{0!s}".format(traceback.format_exc()))
         raise TokenAdminError("token create failed {0!r}".format(e), id=1112)
+
+    # We only set the tokenkind here, if it was explicitly set in the
+    # init_token call.
+    # In all other cases it is set in the update method of the tokenclass.
+    if tokenkind:
+        tokenobject.add_tokeninfo("tokenkind", tokenkind)
 
     # Set the validity period
     validity_period_start = param.get("validity_period_start")

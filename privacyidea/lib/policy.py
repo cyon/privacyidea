@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 #
+#  2018-01-15 Cornelius Kölbel <cornelius.koelbel@netknights.it>
+#             Add tokeninfo field policy
+#             Add add_resolver_in_result
 #  2017-11-14 Cornelius Kölbel <cornelius.koelbel@netknights.it>
 #             Add policy action for customization of menu and baseline
 #  2017-01-22 Cornelius Kölbel <cornelius.koelbel@netknights.it>
@@ -233,6 +236,7 @@ class ACTION(object):
     MAXTOKENUSER = "max_token_per_user"
     NODETAILSUCCESS = "no_detail_on_success"
     ADDUSERINRESPONSE = "add_user_in_response"
+    ADDRESOLVERINRESPONSE = "add_resolver_in_response"
     NODETAILFAIL = "no_detail_on_fail"
     OTPPIN = "otppin"
     OTPPINRANDOM = "otp_pin_random"
@@ -269,6 +273,7 @@ class ACTION(object):
     TOKENPAGESIZE = "token_page_size"
     TOKENREALMS = "tokenrealms"
     TOKENTYPE = "tokentype"
+    TOKENINFO = "tokeninfo"
     TOKENWIZARD = "tokenwizard"
     TOKENWIZARD2ND = "tokenwizard_2nd_token"
     TRIGGERCHALLENGE = "triggerchallenge"
@@ -1559,6 +1564,10 @@ def get_static_policy_definitions(scope=None):
                 'type': 'str',
                 'desc': _('The user will only be authenticated if the serial '
                           'number of the token matches this regexp.')},
+            ACTION.TOKENINFO: {
+                'type': 'str',
+                'desc': _("The user will only be authenticated if the tokeninfo "
+                          "field matches the regexp. key/<regexp>/")},
             ACTION.SETREALM: {
                 'type': 'str',
                 'value': realms,
@@ -1577,6 +1586,11 @@ def get_static_policy_definitions(scope=None):
                 'type': 'bool',
                 'desc': _('In case of successful authentication user data '
                           'will be added in the detail branch of the '
+                          'authentication response.')},
+            ACTION.ADDRESOLVERINRESPONSE: {
+                'type': 'bool',
+                'desc': _('In case of successful authentication the user resolver and '
+                          'realm will be added in the detail branch of the '
                           'authentication response.')},
             ACTION.APIKEY: {
                 'type': 'bool',

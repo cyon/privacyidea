@@ -1,5 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+#
+# 2018-02-21 Cornelius Kölbel <cornelius.koelbel@netknights.it>
+#            Allow to import PSKC file
 # 2017-11-21 Cornelius Kölbel <corenlius.koelbel@netknights.it>
 #            export to CSV including usernames
 # 2017-10-18 Cornelius Kölbel <cornelius.koelbel@netknights.it>
@@ -97,7 +100,7 @@ Actions:
 
 """.format("|".join(ALLOWED_ACTIONS))
 from privacyidea.lib.token import (get_tokens, remove_token, enable_token,
-                                   unassign_token)
+                                   unassign_token, import_token)
 from privacyidea.app import create_app
 from flask.ext.script import Manager
 import re
@@ -417,8 +420,8 @@ def find(last_auth, assigned, active, tokeninfo_key, tokeninfo_value,
                 print(u"{0!s},{1!s}".format(user, len(tokens)))
 
     elif action == "export":
-        key, soup = export_pskc(tlist)
-        sys.stderr.write("\n{0!s} tokens exported.\n".format(len(tlist)))
+        key, token_num, soup = export_pskc(tlist)
+        sys.stderr.write("\n{0!s} tokens exported.\n".format(token_num))
         sys.stderr.write("\nThis is the AES encryption key of the token seeds.\n"
                          "You need this key to import the tokens again:\n\n\t{0!s}\n\n".format(key))
         print("{0!s}".format(soup))
@@ -449,6 +452,34 @@ def find(last_auth, assigned, active, tokeninfo_key, tokeninfo_value,
                 print("Failed to process token {0}.".format(
                     token_obj.token.serial))
                 print(u"{0}".format(exx))
+
+
+@manager.option('--pskc', dest='pskc',
+                help='Import this PSKC file.')
+@manager.option('--preshared_key_hex', dest='preshared_key_hex',
+                help='The AES encryption key.')
+def loadtokens(pskc, preshared_key_hex):
+    from privacyidea.lib.importotp import parsePSKCdata
+    from privacyidea.lib.token import init_token, TOKENKIND
+
+    with open(pskc, 'r') as pskcfile:
+        file_contents = pskcfile.read()
+
+    TOKENS = parsePSKCdata(file_contents, preshared_key_hex)
+    success = 0
+    failed = 0
+    failed_tokens = []
+    for serial in TOKENS:
+        try:
+            print("Importing token {0!s}".format(serial))
+            import_token(serial, TOKENS[serial])
+            success = success + 1
+        except Exception as e:
+            failed = failed + 1
+            failed_tokens.append(serial)
+            print("--- Failed to import token. {0!s}".format(e))
+    print("Successfully imported {0!s} tokens.".format(success))
+    print("Failed to import {0!s} tokens: {1!s}".format(failed, failed_tokens))
 
 
 if __name__ == '__main__':

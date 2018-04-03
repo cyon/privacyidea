@@ -2,6 +2,9 @@
 #  Copyright (C) 2014 Cornelius Kölbel
 #  contact:  corny@cornelinux.de
 #
+#  2017-12-22 Cornelius Kölbel <cornelius.koelbel@netknights.it>
+#             Add configurable multi-value-attributes
+#             with the help of Nomen Nescio
 #  2017-07-20 Cornelius Kölbel <cornelius.koelbel@netknights.it>
 #             Fix unicode usernames
 #  2017-01-23 Cornelius Kölbel <cornelius.koelbel@netknights.it>
@@ -60,6 +63,8 @@ from UserIdResolver import UserIdResolver
 import ldap3
 from ldap3 import MODIFY_REPLACE, MODIFY_ADD, MODIFY_DELETE
 from ldap3 import Server, Tls, Connection
+from ldap3.core.exceptions import LDAPOperationResult
+from ldap3.core.results import RESULT_SIZE_LIMIT_EXCEEDED
 import ssl
 
 import os.path
@@ -137,6 +142,44 @@ def get_info_configuration(noschemas):
     return get_schema_info
 
 
+def ignore_sizelimit_exception(conn, generator):
+    """
+    Wrapper for ``paged_search``, which (since ldap3 2.3) throws an exception if the size limit has been
+    reached. This function wraps the generator and ignores this exception.
+
+    Additionally, this checks ``conn.response`` for any leftover entries that were not yet returned
+    by the generator and yields them.
+    """
+    last_entry = None
+    while True:
+        try:
+            last_entry = next(generator)
+            yield last_entry
+        except StopIteration:
+            # If the generator is exceed, we stop
+            break
+        except LDAPOperationResult as e:
+            # If the size limit has been reached, we stop. All other exceptions are re-raised.
+            if e.result == RESULT_SIZE_LIMIT_EXCEEDED:
+                # Workaround: In ldap3 <= 2.4.1, the generator may "forget" to yield some entries that
+                # were transmitted just before the "size limit exceeded" message. In other words,
+                # the exception is raised *before* the generator has yielded those entries.
+                # These leftover entries can still be found in ``conn.response``, so we
+                # just yield them here.
+                # However, as future versions of ldap3 may fix this behavior and
+                # may actually yield those elements as well, this workaround may result in
+                # duplicate entries.
+                # Thus, we check if the last entry we got from the generator can be found
+                # in ``conn.response``. If that is the case, we assume the generator works correctly
+                # and *all* of ``conn.response`` have been yielded already.
+                if last_entry is None or last_entry not in conn.response:
+                    for entry in conn.response:
+                        yield entry
+                break
+            else:
+                raise
+
+
 def cache(func):
     """
     cache the user with his loginname, resolver and UID in a local 
@@ -197,6 +240,7 @@ class IdResolver (UserIdResolver):
         self.loginname_attribute = [""]
         self.searchfilter = u""
         self.userinfo = {}
+        self.multivalueattributes = []
         self.uidtype = ""
         self.noreferrals = False
         self._editable = False
@@ -315,6 +359,14 @@ class IdResolver (UserIdResolver):
                 uid = attributes.get(uidtype)[0]
             else:
                 uid = attributes.get(uidtype)
+            if uidtype.lower() == "objectguid":
+                # For ldap3 versions <= 2.4.1, objectGUID attribute values are returned as UUID strings.
+                # For versions greater than 2.4.1, they are returned in the curly-braced string
+                # representation, i.e. objectGUID := "{" UUID "}"
+                # In order to ensure backwards compatibility for user mappings,
+                # we strip the curly braces from objectGUID values.
+                # If we are using ldap3 <= 2.4.1, there are no curly braces and we leave the value unchanged.
+                uid = uid.strip("{").strip("}")
         return uid
 
     def _trim_user_id(self, userId):
@@ -438,9 +490,9 @@ class IdResolver (UserIdResolver):
                 if ldap_k == map_v:
                     if ldap_k == "objectGUID":
                         ret[map_k] = ldap_v[0]
-                    elif type(ldap_v) == list and map_k not in ["mobile"]:
-                        # All lists (except) mobile return the first value as
-                        #  a string. Mobile is returned as a list
+                    elif type(ldap_v) == list and map_k not in self.multivalueattributes:
+                        # lists that are not in self.multivalueattributes return first value
+                        # as a string. Multi-value-attributes are returned as a list
                         if ldap_v:
                             ret[map_k] = ldap_v[0]
                         else:
@@ -547,10 +599,13 @@ class IdResolver (UserIdResolver):
                                                 size_limit=self.sizelimit,
                                                 generator=True)
         # returns a generator of dictionaries
-        for entry in g:
+        for entry in ignore_sizelimit_exception(self.l, g):
             # Simple fix for ignored sizelimit with Active Directory
             if len(ret) >= self.sizelimit:
                 break
+            # Fix for searchResRef entries which have no attributes
+            if entry.get('type') == 'searchResRef':
+                continue
             try:
                 attributes = entry.get("attributes")
                 user = self._ldap_attributes_to_user_object(attributes)
@@ -624,6 +679,8 @@ class IdResolver (UserIdResolver):
         userinfo = config.get("USERINFO", "{}")
         self.userinfo = yaml.safe_load(userinfo)
         self.userinfo["username"] = self.loginname_attribute[0]
+        multivalueattributes = config.get("MULTIVALUEATTRIBUTES") or '["mobile"]'
+        self.multivalueattributes = yaml.safe_load(multivalueattributes)
         self.map = yaml.safe_load(userinfo)
         self.uidtype = config.get("UIDTYPE", "DN")
         self.noreferrals = is_true(config.get("NOREFERRALS", False))
@@ -634,11 +691,14 @@ class IdResolver (UserIdResolver):
         self.resolverId = self.uri
         self.authtype = config.get("AUTHTYPE", AUTHTYPE.SIMPLE)
         self.tls_verify = is_true(config.get("TLS_VERIFY", False))
+        # Fallback to TLSv1. (int: 3, TLSv1.1: 4, v1.2: 5)
+        self.tls_version = int(config.get("TLS_VERSION") or ssl.PROTOCOL_TLSv1)
+
         self.tls_ca_file = config.get("TLS_CA_FILE") or DEFAULT_CA_FILE
         if self.tls_verify and (self.uri.lower().startswith("ldaps") or
                                     self.start_tls):
             self.tls_context = Tls(validate=ssl.CERT_REQUIRED,
-                                   version=ssl.PROTOCOL_TLSv1,
+                                   version=self.tls_version,
                                    ca_certs_file=self.tls_ca_file)
         else:
             self.tls_context = None
@@ -753,6 +813,7 @@ class IdResolver (UserIdResolver):
                                 'SCOPE': 'string',
                                 'AUTHTYPE': 'string',
                                 'TLS_VERIFY': 'bool',
+                                'TLS_VERSION': 'int',
                                 'TLS_CA_FILE': 'string',
                                 'START_TLS': 'bool',
                                 'CACHE_TIMEOUT': 'int',
@@ -779,7 +840,7 @@ class IdResolver (UserIdResolver):
         Parameters are:
             BINDDN, BINDPW, LDAPURI, TIMEOUT, LDAPBASE, LOGINNAMEATTRIBUTE,
             LDAPSEARCHFILTER, USERINFO, SIZELIMIT, NOREFERRALS, CACERTIFICATE,
-            AUTHTYPE, TLS_VERIFY, TLS_CA_FILE, SERVERPOOL_ROUNDS, SERVERPOOL_SKIP
+            AUTHTYPE, TLS_VERIFY, TLS_VERSION, TLS_CA_FILE, SERVERPOOL_ROUNDS, SERVERPOOL_SKIP
         """
         success = False
         uidtype = param.get("UIDTYPE")
@@ -791,9 +852,10 @@ class IdResolver (UserIdResolver):
         if is_true(param.get("TLS_VERIFY")) \
                 and (ldap_uri.lower().startswith("ldaps") or
                                     param.get("START_TLS")):
+            tls_version = int(param.get("TLS_VERSION") or ssl.PROTOCOL_TLSv1)
             tls_ca_file = param.get("TLS_CA_FILE") or DEFAULT_CA_FILE
             tls_context = Tls(validate=ssl.CERT_REQUIRED,
-                              version=ssl.PROTOCOL_TLSv1,
+                              version=tls_version,
                               ca_certs_file=tls_ca_file)
         else:
             tls_context = None
@@ -832,7 +894,7 @@ class IdResolver (UserIdResolver):
             # returns a generator of dictionaries
             count = 0
             uidtype_count = 0
-            for entry in g:
+            for entry in ignore_sizelimit_exception(l, g):
                 try:
                     userid = cls._get_uid(entry, uidtype)
                     count += 1

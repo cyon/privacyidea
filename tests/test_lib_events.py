@@ -13,6 +13,8 @@ from privacyidea.lib.eventhandler.usernotification import (
 from privacyidea.lib.eventhandler.tokenhandler import (TokenEventHandler,
                                                        ACTION_TYPE, VALIDITY)
 from privacyidea.lib.eventhandler.scripthandler import ScriptEventHandler
+from privacyidea.lib.eventhandler.counterhandler import CounterEventHandler
+from privacyidea.models import EventCounter
 from privacyidea.lib.eventhandler.federationhandler import FederationEventHandler
 from privacyidea.lib.eventhandler.base import BaseEventHandler, CONDITION
 from privacyidea.lib.smtpserver import add_smtpserver
@@ -422,6 +424,47 @@ class BaseEventHandlerTestCase(MyTestCase):
         self.assertEqual(r, False)
 
 
+class CounterEventTestCase(MyTestCase):
+
+    def test_01_increase_counter(self):
+        g = FakeFlaskG()
+        audit_object = FakeAudit()
+        g.logged_in_user = {"username": "admin",
+                            "role": "admin",
+                            "realm": ""}
+        g.audit_object = audit_object
+        builder = EnvironBuilder(method='POST',
+                                 data={'serial': "SPASS01"},
+                                 headers={})
+        env = builder.get_environ()
+        # Set the remote address so that we can filter for it
+        env["REMOTE_ADDR"] = "10.0.0.1"
+        g.client_ip = env["REMOTE_ADDR"]
+        req = Request(env)
+        req.User = User()
+        resp = Response()
+        resp.data = """{"result": {"value": true}}"""
+
+        options = {"g": g,
+                   "request": req,
+                   "response": resp,
+                   "handler_def": {
+                       "options": {
+                           "counter_name": "hallo_counter"}
+                   }
+                   }
+
+        t_handler = CounterEventHandler()
+        res = t_handler.do("increase_counter", options=options)
+        self.assertTrue(res)
+
+        res = t_handler.do("increase_counter", options=options)
+        self.assertTrue(res)
+
+        counter = EventCounter.query.filter_by(counter_name="hallo_counter").first()
+        self.assertEqual(counter.counter_value, 2)
+
+
 class ScriptEventTestCase(MyTestCase):
 
     def test_01_runscript(self):
@@ -701,7 +744,6 @@ class FederationEventTestCase(MyTestCase):
         response = json.loads(options.get("response").data)
         self.assertEqual(response.get("detail").get("origin"),
                          "https://remote/token/init")
-
 
 
 class TokenEventTestCase(MyTestCase):
@@ -997,6 +1039,26 @@ class TokenEventTestCase(MyTestCase):
         t = get_tokens(tokentype="motp")[0]
         self.assertTrue(t)
         self.assertEqual(t.user, user_obj)
+        remove_token(t.token.serial)
+
+        # Enroll an SMS token
+        options = {"g": g,
+                   "request": req,
+                   "response": resp,
+                   "handler_def": {"options":
+                                       {"tokentype": "sms",
+                                        "user": "1",
+                                        "dynamic_phone": "1"}}
+                   }
+
+        t_handler = TokenEventHandler()
+        res = t_handler.do(ACTION_TYPE.INIT, options=options)
+        self.assertTrue(res)
+        # Check if the token was created and assigned
+        t = get_tokens(tokentype="sms")[0]
+        self.assertTrue(t)
+        self.assertEqual(t.user, user_obj)
+        self.assertEqual(t.get_tokeninfo("dynamic_phone"), "1")
         remove_token(t.token.serial)
 
     def test_06_set_description(self):
@@ -1404,7 +1466,8 @@ class UserNotificationTestCase(MyTestCase):
 
         uhandler = UserNotificationEventHandler()
         resp = Response()
-        resp.data = """{"result": {"value": false}}"""
+        # The actual result_status is false and the result_value is false.
+        resp.data = """{"result": {"value": false, "status": false}}"""
         builder = EnvironBuilder(method='POST')
         env = builder.get_environ()
         req = Request(env)
@@ -1417,12 +1480,37 @@ class UserNotificationTestCase(MyTestCase):
              "request": req})
         self.assertEqual(r, False)
 
+        # We expect the result_value to be True, but it is not.
         r = uhandler.check_condition(
             {"g": {},
-             "handler_def": {"conditions": {"result_value": True}},
+             "handler_def": {"conditions": {"result_value": "True"}},
              "response": resp,
              "request": req})
         self.assertEqual(r, False)
+
+        # We expect the result_value to be False, and it is.
+        r = uhandler.check_condition(
+            {"g": {},
+             "handler_def": {"conditions": {"result_value": "False"}},
+             "response": resp,
+             "request": req})
+        self.assertEqual(r, True)
+
+        # We expect the result_status to be True, but it is not!
+        r = uhandler.check_condition(
+            {"g": {},
+             "handler_def": {"conditions": {"result_status": "True"}},
+             "response": resp,
+             "request": req})
+        self.assertEqual(r, False)
+
+        # We expect the result_status to be False, and it is!
+        r = uhandler.check_condition(
+            {"g": {},
+             "handler_def": {"conditions": {"result_status": "False"}},
+             "response": resp,
+             "request": req})
+        self.assertEqual(r, True)
 
         # check a locked token with maxfail = failcount
         builder = EnvironBuilder(method='POST',
